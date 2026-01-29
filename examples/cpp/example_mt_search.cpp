@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <vector>
+#include <atomic>
+#include <algorithm>
+#include <mutex>
 
 
 template<typename T>
@@ -132,6 +135,7 @@ int main(int argc, char* argv[]) {
     // Parse command-line options
     const char* index_load_path = nullptr;
     const char* index_save_path = nullptr;
+    uint32_t max_dataset_rows = 0;
     std::vector<const char*> positional_args;
     
     for (int i = 1; i < argc; i++) {
@@ -139,18 +143,20 @@ int main(int argc, char* argv[]) {
             index_load_path = argv[++i];
         } else if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             index_save_path = argv[++i];
+        } else if (std::strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
+            max_dataset_rows = std::atoi(argv[++i]);
         } else {
             positional_args.push_back(argv[i]);
         }
     }
     
     if (positional_args.size() != 3) {
-        std::cerr << "Usage: " << argv[0] << " [-i index_file] [-o index_file] <dataset_file> <queries_file> <groundtruth_file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [-i index_file] [-o index_file] [-n max_rows] <dataset_file> <queries_file> <groundtruth_file>" << std::endl;
         return EXIT_FAILURE;
     }
 
     try {
-        BinaryFile<float> dataset(positional_args[0], 100);
+        BinaryFile<float> dataset(positional_args[0], max_dataset_rows);
         BinaryFile<float> queries(positional_args[1]);
         BinaryFile<int> groundtruth(positional_args[2]);
         
@@ -185,8 +191,17 @@ int main(int argc, char* argv[]) {
             
             // Add data to index
             std::cout << "Building index with " << max_elements << " points..." << std::endl;
+            std::atomic<size_t> progress(0);
+            size_t report_interval = (max_elements / 100 > 0) ? (max_elements / 100) : 1; // Report every 1%
+            
             ParallelFor(0, max_elements, num_threads, [&](size_t row, size_t threadId) {
                 alg_hnsw->addPoint((void*)(dataset.data() + dim * row), row);
+                size_t current = progress.fetch_add(1) + 1;
+                if (current % report_interval == 0 || current == max_elements) {
+                    // Only one thread will have each specific 'current' value, so no race on printing
+                    std::cout << "  Progress: " << current << "/" << max_elements 
+                              << " (" << (100.0 * current / max_elements) << "%)" << std::endl;
+                }
             });
             std::cout << "Index built successfully" << std::endl;
         }
