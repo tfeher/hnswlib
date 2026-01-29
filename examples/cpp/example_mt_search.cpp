@@ -167,9 +167,10 @@ int main(int argc, char* argv[]) {
         int dim = dataset.cols();
         int max_elements = dataset.rows();
         int num_queries = queries.rows();
-        int M = 16;
+        int M = 24;
         int ef_construction = 200;
-        int num_threads = 20;
+        int num_threads = std::thread::hardware_concurrency();
+        std::cout << "Using " << num_threads << " threads" << std::endl;
         
         // Initing or loading index
         hnswlib::L2Space space(dim);
@@ -197,46 +198,43 @@ int main(int argc, char* argv[]) {
             std::cout << "Index saved successfully" << std::endl;
         }
         
-        // Query with the loaded queries
+        // Search with different ef values
         int k = 10;
-        std::cout << "Searching " << num_queries << " queries for " << k << " neighbors..." << std::endl;
-        std::vector<std::vector<hnswlib::labeltype>> neighbors(num_queries, std::vector<hnswlib::labeltype>(k));
-        ParallelFor(0, num_queries, num_threads, [&](size_t row, size_t threadId) {
-            std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(queries.data() + dim * row, k);
-            for (int j = k - 1; j >= 0; j--) {
-                neighbors[row][j] = result.top().second;
-                result.pop();
-            }
-        });
+        std::vector<int> ef_values = {10, 20, 40, 80, 120, 200, 400, 800};
         
-        std::cout << "Search completed. First 5 queries:" << std::endl;
-        for (int i = 0; i < std::min(5, num_queries); i++) {
-            std::cout << "Query " << i << " -> Neighbors: ";
-            for (int j = 0; j < k; j++) {
-                std::cout << neighbors[i][j];
-                if (j < k - 1) std::cout << ", ";
-            }
-            std::cout << std::endl;
-        }
+        std::cout << "\nef, recall" << std::endl;
         
-        // Calculate recall
-        int gt_cols = std::min(k, static_cast<int>(groundtruth.cols()));
-        int total_matches = 0;
-        for (int i = 0; i < num_queries; i++) {
-            std::unordered_set<int> gt_set;
-            for (int j = 0; j < gt_cols; j++) {
-                gt_set.insert(groundtruth.data()[i * groundtruth.cols() + j]);
-            }
-            for (int j = 0; j < k; j++) {
-                if (gt_set.count(neighbors[i][j])) {
-                    total_matches++;
+        for (int ef : ef_values) {
+            alg_hnsw->setEf(ef);
+            
+            // Query with the loaded queries
+            std::vector<std::vector<hnswlib::labeltype>> neighbors(num_queries, std::vector<hnswlib::labeltype>(k));
+            ParallelFor(0, num_queries, num_threads, [&](size_t row, size_t threadId) {
+                std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(queries.data() + dim * row, k);
+                for (int j = k - 1; j >= 0; j--) {
+                    neighbors[row][j] = result.top().second;
+                    result.pop();
+                }
+            });
+            
+            // Calculate recall
+            int gt_cols = std::min(k, static_cast<int>(groundtruth.cols()));
+            int total_matches = 0;
+            for (int i = 0; i < num_queries; i++) {
+                std::unordered_set<int> gt_set;
+                for (int j = 0; j < gt_cols; j++) {
+                    gt_set.insert(groundtruth.data()[i * groundtruth.cols() + j]);
+                }
+                for (int j = 0; j < k; j++) {
+                    if (gt_set.count(neighbors[i][j])) {
+                        total_matches++;
+                    }
                 }
             }
+            
+            double recall = static_cast<double>(total_matches) / (num_queries * k);
+            std::cout << ef << ", " << recall << std::endl;
         }
-        
-        double recall = static_cast<double>(total_matches) / (num_queries * k);
-        std::cout << "\nRecall@" << k << ": " << recall 
-                  << " (" << total_matches << "/" << (num_queries * k) << ")" << std::endl;
         
         delete alg_hnsw;
     } catch (const std::exception& e) {
