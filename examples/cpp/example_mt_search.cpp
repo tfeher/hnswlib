@@ -4,12 +4,17 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <cstring>
+#include <cstdio>
+#include <cmath>
 #include <stdexcept>
 #include <unordered_set>
 #include <vector>
 #include <atomic>
 #include <algorithm>
 #include <mutex>
+#include <map>
+#include <fstream>
+#include <chrono>
 
 
 template<typename T>
@@ -215,24 +220,35 @@ int main(int argc, char* argv[]) {
         
         // Search with different ef values
         int k = 10;
+        int num_iterations = 10;
         std::vector<int> ef_values = {10, 20, 40, 80, 120, 200, 400, 800};
         
-        std::cout << "\nef, recall" << std::endl;
+        std::cout << "\nef,recall,qps" << std::endl;
         
         for (int ef : ef_values) {
             alg_hnsw->setEf(ef);
             
-            // Query with the loaded queries
             std::vector<std::vector<hnswlib::labeltype>> neighbors(num_queries, std::vector<hnswlib::labeltype>(k));
-            ParallelFor(0, num_queries, num_threads, [&](size_t row, size_t threadId) {
-                std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(queries.data() + dim * row, k);
-                for (int j = k - 1; j >= 0; j--) {
-                    neighbors[row][j] = result.top().second;
-                    result.pop();
-                }
-            });
             
-            // Calculate recall
+            // Run search multiple times to measure average time
+            auto start_time = std::chrono::high_resolution_clock::now();
+            
+            for (int iter = 0; iter < num_iterations; iter++) {
+                ParallelFor(0, num_queries, num_threads, [&](size_t row, size_t threadId) {
+                    std::priority_queue<std::pair<float, hnswlib::labeltype>> result = alg_hnsw->searchKnn(queries.data() + dim * row, k);
+                    for (int j = k - 1; j >= 0; j--) {
+                        neighbors[row][j] = result.top().second;
+                        result.pop();
+                    }
+                });
+            }
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+            double avg_time_seconds = duration.count() / 1000000.0 / num_iterations;
+            double qps = num_queries / avg_time_seconds;
+            
+            // Calculate recall (using results from last iteration)
             int gt_cols = std::min(k, static_cast<int>(groundtruth.cols()));
             int total_matches = 0;
             for (int i = 0; i < num_queries; i++) {
@@ -248,7 +264,7 @@ int main(int argc, char* argv[]) {
             }
             
             double recall = static_cast<double>(total_matches) / (num_queries * k);
-            std::cout << ef << ", " << recall << std::endl;
+            std::cout << ef << "," << recall << "," << qps << std::endl;
         }
         
         delete alg_hnsw;
